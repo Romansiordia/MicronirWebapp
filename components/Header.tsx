@@ -14,9 +14,9 @@ const Header: React.FC = () => {
             MicroNIR <span className="text-cyan-400 font-light">Diagnostic Suite</span>
           </h1>
           <p className="text-slate-400 mt-1 text-xs uppercase tracking-[0.2em] font-medium flex items-center gap-2">
-            Protocolo de Comunicación v2.4.0
+            Protocolo V5.0 (Baud Hunter)
             <span className="inline-block w-1 h-1 bg-slate-600 rounded-full"></span>
-            MicroNirCommunication.dll
+            Auto-Detect Enabled
           </p>
         </div>
         

@@ -2,6 +2,6 @@
   "name": "MicroNIR Web Diagnostic Suite",
   "description": "A high-performance React application for communicating with MicroNIR devices via Web Bluetooth, featuring real-time diagnostic logging and spectral data visualization.",
   "requestFramePermissions": [
-    "bluetooth"
+    "serial"
   ]
 }

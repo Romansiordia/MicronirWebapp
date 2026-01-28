@@ -1,4 +1,3 @@
-
 import React, { useState, useCallback, useEffect } from 'react';
 import { LogType, LogEntry, ConnectionStatus, SpectrumPoint } from './types';
 import DiagnosticTerminal from './components/DiagnosticTerminal';
@@ -27,9 +26,9 @@ const App: React.FC = () => {
   useEffect(() => {
     driver.setLogger((msg: string) => {
       let type = LogType.INFO;
-      if (msg.includes("TX ->")) type = LogType.CMD;
-      if (msg.includes("ERROR")) type = LogType.ERROR;
-      if (msg.includes("Espectro") || msg.includes("LISTO")) type = LogType.DATA;
+      if (msg.includes("TX ->") || msg.includes("RX <<")) type = LogType.CMD;
+      if (msg.includes("ERROR") || msg.includes("Error") || msg.includes("Timeout")) type = LogType.ERROR;
+      if (msg.includes("Espectro") || msg.includes("recibido")) type = LogType.DATA;
       addLog(msg, type);
     });
   }, [addLog]);
@@ -39,7 +38,7 @@ const App: React.FC = () => {
       setStatus(ConnectionStatus.CONNECTING);
       setTimeout(() => {
         setStatus(ConnectionStatus.SIMULATING);
-        setDeviceName("MicroNIR-Sim-BT");
+        setDeviceName("MicroNIR-Sim-Proto");
       }, 500);
       return;
     }
@@ -48,11 +47,10 @@ const App: React.FC = () => {
       setStatus(ConnectionStatus.CONNECTING);
       const res = await driver.connect();
       
-      // Aseguramos que el estado cambie SÓLO si el driver confirma conexión
       if (driver.isConnected) {
-        setDeviceName(res.model || "MicroNIR OnSite");
+        setDeviceName(res.model || "MicroNIR Serial");
         setStatus(ConnectionStatus.CONNECTED);
-        addLog("Interfaz desbloqueada. Listo para comandos.", LogType.INFO);
+        addLog("Conexión serial establecida. Protocolo V2 activo.", LogType.INFO);
       } else {
         setStatus(ConnectionStatus.IDLE);
       }
@@ -78,16 +76,21 @@ const App: React.FC = () => {
 
   const sendCommand = async (cmd: string) => {
     if (isSimulated) {
-      const mockData = Array.from({ length: 128 }, (_, i) => ({
-        wavelength: 900 + (i * 6.3),
-        intensity: 0.1 + Math.random() * 0.5
-      }));
-      setSpectrumData(mockData);
+      if (cmd === 'PerformScan') {
+          const mockData = Array.from({ length: 128 }, (_, i) => ({
+            wavelength: 900 + (i * 6.3),
+            intensity: 0.1 + Math.random() * 0.5
+          }));
+          setSpectrumData(mockData);
+          addLog("Simulación: Scan completado.", LogType.DATA);
+      } else {
+          addLog(`Simulación: Comando ${cmd} ejecutado.`, LogType.CMD);
+      }
       return;
     }
 
     if (!driver.isConnected) {
-      addLog("Error: El driver reporta que no hay conexión activa.", LogType.ERROR);
+      addLog("Error: Dispositivo no conectado.", LogType.ERROR);
       setStatus(ConnectionStatus.IDLE);
       return;
     }
@@ -95,36 +98,39 @@ const App: React.FC = () => {
     try {
       switch (cmd) {
         case 'PerformScan':
+          addLog("Iniciando Scan (Cmd S)...", LogType.INFO);
           const raw = await driver.scan();
           if (raw) setSpectrumData(processScanResult(raw));
           break;
 
         case 'PerformDark':
-          addLog("Iniciando captura DARK (Lámpara Apagada)...", LogType.CMD);
-          await driver.setLamp(false);
+          addLog("⚠️ PARA DARK REF: Asegure que el sensor esté totalmente bloqueado.", LogType.WARN);
+          addLog("Ejecutando Scan para referencia oscura...", LogType.CMD);
           const darkRaw = await driver.scan();
           if (darkRaw) setSpectrumData(processScanResult(darkRaw));
           break;
 
         case 'PerformWhite':
-          addLog("Iniciando captura WHITE (Lámpara Encendida)...", LogType.CMD);
-          await driver.setLamp(true);
-          addLog("Esperando estabilidad de la lámpara (1.5s)...", LogType.INFO);
-          await new Promise(r => setTimeout(r, 1500));
+          addLog("⚠️ PARA WHITE REF: Coloque el estándar de referencia blanco.", LogType.WARN);
+          // Opcional: Hacer un Warm-up antes para asegurar estabilidad
+          await driver.warmUp(); 
+          addLog("Ejecutando Scan de referencia blanca...", LogType.CMD);
           const whiteRaw = await driver.scan();
           if (whiteRaw) setSpectrumData(processScanResult(whiteRaw));
           break;
 
-        case 'LampsOn':
-          await driver.setLamp(true);
+        case 'WarmUp':
+          addLog("Enviando comando Warm-up (W)...", LogType.CMD);
+          await driver.warmUp();
           break;
         
-        case 'GetTemp':
-          addLog("Comando de temperatura no soportado en este modelo BLE todavía.", LogType.WARN);
+        case 'GetVersion':
+          addLog("Solicitando info del sistema (V)...", LogType.CMD);
+          await driver.getSystemInfo();
           break;
 
         default:
-          addLog(`Comando ${cmd} desconocido.`, LogType.WARN);
+          addLog(`Comando UI ${cmd} no implementado.`, LogType.WARN);
       }
     } catch (e: any) {
       addLog(`Error ejecución: ${e.message}`, LogType.ERROR);
@@ -159,7 +165,7 @@ const App: React.FC = () => {
                 </h3>
                 {status === ConnectionStatus.CONNECTED && (
                   <span className="text-[10px] bg-cyan-100 text-cyan-700 px-2 py-0.5 rounded-full font-bold animate-pulse">
-                    LIVE
+                    SERIAL V2
                   </span>
                 )}
               </div>
