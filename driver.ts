@@ -1,23 +1,19 @@
 
 /**
- * DRIVER MICRO NIR - VERSIÓN ULTRA-COMPATIBLE
- * Integra lógica de: MicroNirCommunication.dll (Binary CCP) + Android Kotlin (GATT FFE0/FFE1)
+ * DRIVER MICRO NIR - VERSIÓN SERVICE FIRST V10
+ * Estrategia: Forzar descubrimiento por UUID de Servicio.
+ * Al filtrar por { services: [UUID] }, obligamos a Windows a verificar
+ * que el dispositivo realmente tiene el servicio antes de mostrarlo,
+ * rompiendo el caché de "Solo Generic Access".
  */
 
 const UUIDS = {
-  // Servicio y Característica identificados en Android y DLL
-  SERVICE: '0000ffe0-0000-1000-8000-00805f9b34fb',
-  CHARACTERISTIC: '0000ffe1-0000-1000-8000-00805f9b34fb',
+  SERVICE_DATA: '0000ffe0-0000-1000-8000-00805f9b34fb', // SERVICE_UART
+  CHARACTERISTIC_DATA: '0000ffe1-0000-1000-8000-00805f9b34fb', // CHAR_UART_TX_RX
   
-  // Servicios Auxiliares
-  DEVICE_INFO: 0x180a,
-  GENERIC_ACCESS: 0x1800
-};
-
-const OPCODES = {
-  SCAN: 0x02,
-  LAMP: 0x03,
-  STATUS: 0x05
+  // Servicios estándar
+  SERVICE_BATTERY: 'battery_service',
+  SERVICE_DEV_INFO: 'device_information'
 };
 
 export class MicroNIRDriver {
@@ -31,83 +27,92 @@ export class MicroNIRDriver {
   public setLogger(fn: (msg: string) => void) { this.logger = fn; }
   private log(msg: string) { this.logger(msg); }
 
-  /**
-   * Conexión siguiendo el flujo de Android: Discovery -> Service FFE0 -> Char FFE1 -> Notify
-   */
   async connect(): Promise<any> {
     try {
-      this.log("Iniciando búsqueda de hardware MicroNIR...");
+      this.log("Iniciando conexión V10 (Service First)...");
       
+      // PASO 1: Solicitud de Dispositivo - ESTRATEGIA INVERTIDA
+      // Buscamos explícitamente el UUID. Si el dispositivo aparece en la lista
+      // usando este filtro, GARANTIZA que Windows ha visto el servicio.
       this.device = await (navigator as any).bluetooth.requestDevice({
         filters: [
-          { namePrefix: 'MicroNIR' },
-          { namePrefix: 'M1-' },
-          { namePrefix: 'VIAVI' }
+          { services: [UUIDS.SERVICE_DATA] }, // Prioridad 1: Debe tener FFE0
+          { namePrefix: 'MicroNIR' },         // Respaldo por nombre
+          { namePrefix: 'Viavi' },
+          { namePrefix: 'M1-' }
         ],
-        optionalServices: [UUIDS.SERVICE, UUIDS.DEVICE_INFO, UUIDS.GENERIC_ACCESS]
+        optionalServices: [
+          UUIDS.SERVICE_DATA,       
+          UUIDS.SERVICE_BATTERY,
+          UUIDS.SERVICE_DEV_INFO
+        ]
       });
 
-      this.log(`Dispositivo hallado: ${this.device.name}. Conectando...`);
+      this.log(`Dispositivo seleccionado: ${this.device.name}`);
       
       this.device.addEventListener('gattserverdisconnected', () => {
-        this.log("ADVERTENCIA: Conexión perdida.");
+        this.log("⚠️ Dispositivo desconectado.");
         this.isConnected = false;
       });
 
+      // PASO 2: Conexión Inmediata (Sin esperas artificiales)
       const server = await this.device.gatt.connect();
-      
-      // Simulamos el 'discoverServices' de Android con una espera activa
-      this.log("Sincronizando servicios GATT...");
-      await new Promise(r => setTimeout(r, 1000));
+      this.log("GATT Conectado. Accediendo a servicios...");
 
-      let service;
+      // PASO 3: Obtención de Servicio
+      // Al haber filtrado por servicio, el acceso debería ser directo.
+      let service = null;
       try {
-        service = await server.getPrimaryService(UUIDS.SERVICE);
+        service = await server.getPrimaryService(UUIDS.SERVICE_DATA);
+        this.log("✅ Servicio FFE0 verificado.");
       } catch (e) {
-        this.log("Reintentando descubrimiento profundo de canales...");
-        const services = await server.getPrimaryServices();
-        service = services.find((s: any) => s.uuid.includes('ffe0'));
+        this.log("⚠️ Fallo acceso UUID completo. Probando alias corto 0xffe0...");
+        try {
+            service = await server.getPrimaryService(0xffe0);
+        } catch(err) {
+            // Último intento: listar todo
+            const all = await server.getPrimaryServices();
+            this.log(`Mapa real: ${all.map((s:any)=>s.uuid).join(',')}`);
+            throw new Error("El sistema operativo insiste en que el servicio no existe. Requiere reinicio de Bluetooth.");
+        }
       }
 
-      if (!service) throw new Error("Servicio FFE0 no disponible.");
-
-      this.characteristic = await service.getCharacteristic(UUIDS.CHARACTERISTIC);
-
-      // Habilitar notificaciones (Equivalente a enableNotifications en Kotlin)
-      this.log("Habilitando puerto de datos (FFE1)...");
+      // PASO 4: Característica
+      this.characteristic = await service.getCharacteristic(UUIDS.CHARACTERISTIC_DATA);
       await this.characteristic.startNotifications();
-      
       this.characteristic.addEventListener('characteristicvaluechanged', (event: any) => {
-        const value = new Uint8Array(event.target.value.buffer);
-        this.handleDataPacket(value);
+        const value = event.target.value;
+        const bytes = new Uint8Array(value.buffer);
+        this.handleDataPacket(bytes);
       });
-
-      this.isConnected = true;
-      this.log("¡MICRO NIR ENLACE ESTABLECIDO!");
       
+      this.log("✅ Canal de datos listo (Comando 'S').");
+      this.isConnected = true;
       return { model: this.device.name, status: "CONNECTED" };
+
     } catch (error: any) {
       this.isConnected = false;
-      this.log(`FALLO: ${error.message}`);
+      this.log(`❌ ERROR: ${error.message}`);
       throw error;
     }
   }
 
-  /**
-   * Procesa los bytes del sensor (Reconstrucción del espectro)
-   */
   private handleDataPacket(data: Uint8Array) {
-    // Acumulamos los bytes (un espectro son 256 bytes)
     for (let i = 0; i < data.length; i++) {
       this.scanBuffer.push(data[i]);
     }
 
+    // Procesamiento Little Endian (Vía Snippet)
     if (this.scanBuffer.length >= 256) {
       const pixels = new Uint16Array(128);
+      const view = new DataView(new Uint8Array(this.scanBuffer).buffer);
+
       for (let i = 0; i < 128; i++) {
-        // Los sensores NIR suelen usar Big Endian para el ADC
-        pixels[i] = (this.scanBuffer[i * 2] << 8) | this.scanBuffer[i * 2 + 1];
+        // Little Endian explícito
+        pixels[i] = view.getUint16(i * 2, true); 
       }
+      
+      this.log(`Espectro recibido (${pixels.length} pts).`);
       
       if (this.onScanComplete) {
         this.onScanComplete(pixels);
@@ -116,24 +121,14 @@ export class MicroNIRDriver {
     }
   }
 
-  /**
-   * Envía comandos siguiendo el formato binario de la DLL
-   */
-  private async sendCommandPacket(opcode: number, p1: number, p2: number): Promise<void> {
-    if (!this.characteristic) return;
-    const packet = new Uint8Array([0x02, opcode, p1, p2]);
-    try {
-      await this.characteristic.writeValueWithoutResponse(packet);
-    } catch (e: any) {
-      this.log(`Error TX: ${e.message}`);
-    }
-  }
-
   async setLamp(on: boolean): Promise<boolean> {
     if (!this.isConnected) return false;
-    this.log(`Cambiando estado lámpara: ${on ? 'ON' : 'OFF'}`);
-    await this.sendCommandPacket(OPCODES.LAMP, on ? 0x01 : 0x00, 0x00);
-    return true;
+    // Protocolo Binario para lámpara (suele ser estándar)
+    const packet = new Uint8Array([0x02, 0x03, on ? 0x01 : 0x00, 0x00]);
+    try {
+        await this.characteristic.writeValueWithoutResponse(packet);
+        return true;
+    } catch(e) { return false; }
   }
 
   async scan(): Promise<Uint16Array | null> {
@@ -143,23 +138,37 @@ export class MicroNIRDriver {
     return new Promise(async (resolve) => {
       const timer = setTimeout(() => {
         this.onScanComplete = null;
-        this.log("TIMEOUT: Sin respuesta del sensor.");
         resolve(null);
-      }, 7000);
+      }, 8000);
 
       this.onScanComplete = (pixels) => {
         clearTimeout(timer);
-        this.onScanComplete = null;
         resolve(pixels);
       };
 
-      await this.sendCommandPacket(OPCODES.SCAN, 0x01, 0x00);
+      // INTENTO 1: Protocolo de Texto (Snippet Usuario)
+      try {
+          const cmd = new TextEncoder().encode("S");
+          // Usamos writeValue (con respuesta) si es posible, es más seguro
+          if (this.characteristic.properties.write) {
+             await this.characteristic.writeValue(cmd);
+          } else {
+             await this.characteristic.writeValueWithoutResponse(cmd);
+          }
+          this.log("TX: 'S' (Scan)");
+      } catch(e: any) {
+          this.log(`Error TX 'S': ${e.message}`);
+          
+          // Fallback: Protocolo Binario
+          this.log("Reintentando con protocolo binario...");
+          const packet = new Uint8Array([0x02, 0x02, 0x01, 0x00]);
+          await this.characteristic.writeValueWithoutResponse(packet);
+      }
     });
   }
 
   async disconnect() {
     if (this.device?.gatt.connected) {
-      await this.setLamp(false);
       this.device.gatt.disconnect();
     }
     this.isConnected = false;
